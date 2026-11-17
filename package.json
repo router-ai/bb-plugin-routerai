@@ -1,0 +1,55 @@
+{
+  "name": "bb-plugin-routerai",
+  "version": "0.0.1",
+  "private": true,
+  "description": "RouterAI provider for bb: run threads on routerai.ru models.",
+  "type": "module",
+  "engines": {
+    "bb": ">=0.49",
+    "bbPluginSdk": ">=0.6.132"
+  },
+  "bb": {
+    "name": "RouterAI",
+    "description": "Run bb threads on routerai.ru models with OpenCode as the agent.",
+    "branding": {
+      "icon": "./icons/routerai.svg",
+      "experimental_icons": {
+        "mark": "./icons/routerai.svg"
+      }
+    },
+    "server": "./server.ts",
+    "host": "./host.ts",
+    "experimental_providers": [
+      {
+        "kind": "agent",
+        "id": "routerai",
+        "displayName": "RouterAI"
+      }
+    ],
+    "app": "./app.tsx"
+  },
+  "scripts": {
+    "build": "bb plugin build",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@get-bb/plugin-sdk": "0.6.132",
+    "@radix-ui/react-slot": "^1.5.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "tailwind-merge": "^3.7.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "better-sqlite3": "^12.0.0",
+    "cron-parser": "^5.5.0",
+    "hono": "^4.11.9",
+    "typescript": "^5.7.0",
+    "vitest": "^4.0.0"
+  }
+}
