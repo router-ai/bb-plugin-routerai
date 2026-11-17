@@ -45,3 +45,7 @@ docker compose exec bb sh /lab/oauth-e2e.sh                        # сквоз�
 ```
 
 Интерфейс bb: http://127.0.0.1:38886. Версия `@get-bb/plugin-sdk` должна совпадать с той, с которой работает bb стенда, иначе плагин помечается несовместимым.
+
+## Лицензия
+
+MIT, см. `LICENSE`. Базовые компоненты интерфейса (`components/ui/`, `lib/utils.ts`) взяты из штатного шаблона плагина bb (`bb plugin new`) — MIT, © Michael Yong, см. `LICENSE.bb-upstream`.

@@ -2,6 +2,7 @@
   "name": "bb-plugin-routerai",
   "version": "0.0.1",
   "private": true,
+  "license": "MIT",
   "description": "RouterAI provider for bb: run threads on routerai.ru models.",
   "type": "module",
   "engines": {
