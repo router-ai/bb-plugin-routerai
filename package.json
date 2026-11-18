@@ -1,9 +1,14 @@
 {
   "name": "bb-plugin-routerai",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
   "license": "MIT",
   "description": "RouterAI provider for bb: run threads on routerai.ru models.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/router-ai/bb-plugin-routerai.git"
+  },
+  "homepage": "https://routerai.ru",
   "type": "module",
   "engines": {
     "bb": ">=0.49",
