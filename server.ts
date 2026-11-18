@@ -7,6 +7,7 @@ import { hostname } from "node:os";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { AccountStore, type AccountStatus } from "./src/account.js";
+import { CLAUDE_PROVIDER_ID, claudeCodeEnv, spendFromEvents, toSpendEvents, type SpendEvent } from "./src/claude-code.js";
 import { CLI_COMMANDS, runCli, type CliActions } from "./src/cli.js";
 import { PROVIDER_ID, hostContract } from "./src/contract.js";
 import { OPENCODE_CONFIG_ENV, buildOpenCodeConfig } from "./src/opencode-config.js";
@@ -34,7 +35,16 @@ const SIGNED_OUT_MESSAGE =
 const REJECTED_MESSAGE =
   "RouterAI rejected the key. Sign in again under Settings → Plugins → RouterAI, or run `bb routerai login`.";
 
+const CLAUDE_SIGNED_OUT_MESSAGE =
+  "Claude Code is set to run through RouterAI, but RouterAI is not signed in. Sign in under Settings → Plugins → RouterAI, or turn “Claude Code through RouterAI” off there.";
+const CLAUDE_REJECTED_MESSAGE =
+  "Claude Code is set to run through RouterAI, but RouterAI rejected the key. Sign in again under Settings → Plugins → RouterAI, or turn “Claude Code through RouterAI” off there.";
 const INSTALLATION_NAME_KEY = "installation-name";
+/** bb returns at most this many thread events per request. */
+const SPEND_PAGE_SIZE = 100;
+const SPEND_MAX_PAGES = 50;
+/** Storage keys naming the Claude Code threads that ran through RouterAI. */
+const CLAUDE_THREAD_PREFIX = "claude-thread:";
 /** Storage keys naming the machines that hold a key file. */
 const KEY_HOST_PREFIX = "key-host:";
 
@@ -69,6 +79,13 @@ export default async function plugin(bb: BbPluginApi, deps: PluginDeps = {}) {
         },
         { message: "Expected a JSON array of <author>/<model> slugs" },
       ),
+    },
+    claudeCode: {
+      type: "boolean",
+      label: "Claude Code through RouterAI",
+      description:
+        "Run bb's own Claude Code provider on RouterAI: Claude models, paid in rubles from your RouterAI balance. While on, Claude Code does not use your Claude subscription.",
+      default: false,
     },
   });
 
@@ -367,27 +384,101 @@ export default async function plugin(bb: BbPluginApi, deps: PluginDeps = {}) {
     }
   }
 
+  /** True for a key last seen rejected that RouterAI, asked again, still rejects. */
+  async function keyStillRejected(apiKey: string): Promise<boolean> {
+    if (!account.knownRejected(apiKey)) return false;
+    account.reset();
+    const status = await accountStatus(apiKey);
+    return status.signedIn && status.problem?.kind === "rejected";
+  }
+
   // Stop a message that cannot be answered before a thread fails on it with
   // a bare "401 Unauthorized" or "spawn opencode ENOENT": say what to do
   // instead. This sits on the path of every message, so it asks the machine
   // only until the agent is found there, and RouterAI only to re-check a key
   // it already knows as rejected.
   bb.experimental_hooks.on("message.dispatch", async ({ requestedExecution, host: machine }) => {
+    if (requestedExecution.providerId === CLAUDE_PROVIDER_ID) {
+      const current = await settings.get();
+      if (!current.claudeCode) return { action: "proceed" };
+      if (current.apiKey === undefined || current.apiKey === "") {
+        return { action: "reject", message: CLAUDE_SIGNED_OUT_MESSAGE };
+      }
+      return (await keyStillRejected(current.apiKey))
+        ? { action: "reject", message: CLAUDE_REJECTED_MESSAGE }
+        : { action: "proceed" };
+    }
     if (requestedExecution.providerId !== PROVIDER_ID) return { action: "proceed" };
     if (machine !== null && !(await agentInstalled(machine.id))) {
       return { action: "reject", message: NO_AGENT_MESSAGE };
     }
     const { apiKey } = await settings.get();
     if (apiKey === undefined || apiKey === "") return { action: "reject", message: SIGNED_OUT_MESSAGE };
-    if (account.knownRejected(apiKey)) {
-      account.reset();
-      const status = await accountStatus(apiKey);
-      if (status.signedIn && status.problem?.kind === "rejected") {
-        return { action: "reject", message: REJECTED_MESSAGE };
-      }
-    }
-    return { action: "proceed" };
+    return (await keyStillRejected(apiKey)) ? { action: "reject", message: REJECTED_MESSAGE } : { action: "proceed" };
   });
+
+  // Claude Code through RouterAI: bb's own provider gets the RouterAI address
+  // and a settings directory that reads the key from our key file.
+  const claudeConfigDirs = new Map<string, string>();
+  const spendEvents = new Map<string, { afterSeq: string | undefined; events: SpendEvent[] }>();
+
+  async function claudeConfigDir(hostId: string): Promise<string> {
+    const known = claudeConfigDirs.get(hostId);
+    if (known !== undefined) return known;
+    const { path } = await host.call("prepareClaudeConfig", {}, { hostId });
+    claudeConfigDirs.set(hostId, path);
+    return path;
+  }
+
+  bb.providers.experimental_contributeEnv(CLAUDE_PROVIDER_ID, async ({ hostId, threadId }) => {
+    const current = await settings.get();
+    // Off, or signed out: Claude Code runs as the user set it up themselves.
+    // (A signed-out message is stopped earlier, in the dispatch hook.)
+    if (!current.claudeCode || current.apiKey === undefined || current.apiKey === "") return [];
+    const [configDir] = await Promise.all([
+      claudeConfigDir(hostId),
+      syncCredentials(hostId, current.apiKey, credentials.get(hostId)?.rejected ?? false),
+    ]);
+    if (threadId !== null) await bb.storage.kv.set(CLAUDE_THREAD_PREFIX + threadId, true);
+    return claudeCodeEnv({ baseUrl: current.baseUrl, configDir });
+  });
+
+  // Without a Claude sign-in of its own the provider reads as signed out;
+  // a working RouterAI key makes it ready.
+  bb.providers.experimental_contributeEnvHealth(CLAUDE_PROVIDER_ID, async ({ hostId }) => {
+    const current = await settings.get();
+    if (!current.claudeCode) return null;
+    const status = await accountStatus(current.apiKey);
+    if (!status.signedIn || status.problem?.kind === "rejected") return null;
+    await Promise.all([claudeConfigDir(hostId), syncCredentials(hostId, current.apiKey)]);
+    return { label: "RouterAI", statusMessage: "Runs through RouterAI." };
+  });
+
+  /**
+   * What a Claude Code thread spent through RouterAI, rubles; null for any
+   * other thread. bb records token counts for these threads, not money.
+   */
+  async function claudeThreadSpend(threadId: string): Promise<number | null> {
+    if ((await bb.storage.kv.get(CLAUDE_THREAD_PREFIX + threadId)) !== true) return null;
+    // bb hands out events a page at a time; keep what was read and ask only
+    // for what came after, since an open thread is asked about again and again.
+    const seen = spendEvents.get(threadId) ?? { afterSeq: undefined, events: [] };
+    spendEvents.set(threadId, seen);
+    for (let page = 0; page < SPEND_MAX_PAGES; page += 1) {
+      const rows = await bb.sdk.threads.events.list({
+        threadId,
+        types: ["client/turn/requested", "thread/tokenUsage/updated"],
+        order: "asc",
+        limit: String(SPEND_PAGE_SIZE),
+        ...(seen.afterSeq === undefined ? {} : { afterSeq: seen.afterSeq }),
+      });
+      seen.events.push(...toSpendEvents(rows));
+      const last = rows.at(-1);
+      if (last !== undefined) seen.afterSeq = String(last.seq);
+      if (rows.length < SPEND_PAGE_SIZE) break;
+    }
+    return spendFromEvents(seen.events, await catalog.list());
+  }
 
   const actions: CliActions = {
     async status() {
@@ -410,6 +501,12 @@ export default async function plugin(bb: BbPluginApi, deps: PluginDeps = {}) {
     async setModels(ids) {
       await settings.experimental_set({ models: JSON.stringify(ids) });
     },
+    async claudeCode() {
+      return (await settings.get()).claudeCode;
+    },
+    async setClaudeCode(enabled) {
+      await settings.experimental_set({ claudeCode: enabled });
+    },
   };
 
   bb.cli.register({
@@ -422,7 +519,11 @@ export default async function plugin(bb: BbPluginApi, deps: PluginDeps = {}) {
   bb.rpc.register(rpcContract, {
     async status() {
       const current = await settings.get();
-      return { ...(await actions.status()), usingStarterSet: parseModelList(current.models).length === 0 };
+      return {
+        ...(await actions.status()),
+        usingStarterSet: parseModelList(current.models).length === 0,
+        claudeCode: current.claudeCode,
+      };
     },
     async catalog() {
       return { models: await actions.catalog() };
@@ -438,6 +539,13 @@ export default async function plugin(bb: BbPluginApi, deps: PluginDeps = {}) {
     async completeLogin({ pasted }) {
       await actions.completeLogin(pasted);
       return {};
+    },
+    async setClaudeCode({ enabled }) {
+      await actions.setClaudeCode(enabled);
+      return {};
+    },
+    async threadSpend({ threadId }) {
+      return { rubles: await claudeThreadSpend(threadId) };
     },
     async logout() {
       await actions.logout();

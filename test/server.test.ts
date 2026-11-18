@@ -5,6 +5,9 @@ import { CATALOG, scriptedFetch } from "./fixtures.js";
 
 const HOST = "host-test";
 const KEY_FILE = "/host/data/credentials";
+const CLAUDE_DIR = "/host/data/claude-code";
+/** The fixture price of `anthropic/claude-sonnet-5.5` input. */
+const SONNET_INPUT_RUB_PER_MILLION = 214.5;
 const CALLBACK = "http://127.0.0.1:38886/api/v1/plugins/routerai/http/oauth/callback";
 
 interface HostCall {
@@ -41,6 +44,10 @@ async function setup(
     ...(options.settings === undefined ? {} : { settings: options.settings }),
     experimental_hostEntry: true,
     experimental_callHostRpc: async ({ method, input, hostId }) => {
+      if (method === "prepareClaudeConfig") {
+        hostCalls.push({ method, input, hostId });
+        return { path: CLAUDE_DIR };
+      }
       if (method === "agentInstalled") {
         agentChecks.count += 1;
         return { installed: options.agentMissing !== true };
@@ -256,6 +263,100 @@ describe("sending a message", () => {
   it("leaves other providers' messages alone", async () => {
     active = await setup();
     expect(await dispatch("claude-code")).toEqual({ action: "proceed" });
+  });
+});
+
+describe("Claude Code through RouterAI", () => {
+  const THREAD = { threadId: "thr_cc", projectId: "proj_1", hostId: HOST };
+  const env = () => active!.harness.behavior.resolveProviderEnv("claude-code", THREAD);
+  const dispatch = () =>
+    active!.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({ requestedExecution: { providerId: "claude-code" } }),
+    );
+
+  it("leaves bb's Claude Code provider alone while the switch is off", async () => {
+    active = await setup({ settings: { apiKey: "sk-good" } });
+    expect(await env()).toEqual([]);
+    expect(await dispatch()).toEqual({ action: "proceed" });
+    expect(await active.harness.behavior.resolveProviderEnvHealth("claude-code", { hostId: HOST })).toBeNull();
+    expect(active.hostCalls).toEqual([]);
+  });
+
+  it("points Claude Code at RouterAI and at settings that read the key file", async () => {
+    active = await setup({ settings: { apiKey: "sk-good" } });
+    expect((await active.harness.behavior.runCli(["claude-code", "on"])).exitCode).toBe(0);
+    const entries = await env();
+    const byName = Object.fromEntries(entries.map((entry) => [entry.name, entry.value]));
+    expect(byName.ANTHROPIC_BASE_URL).toBe("https://routerai.ru/api");
+    expect(byName.CLAUDE_CONFIG_DIR).toBe(CLAUDE_DIR);
+    // The environment is shown in the thread timeline: no key in it.
+    expect(JSON.stringify(entries)).not.toContain("sk-good");
+    expect(active.hostCalls.map((call) => call.method).sort()).toEqual(["prepareClaudeConfig", "storeCredentials"]);
+    // Prepared once per machine.
+    await env();
+    expect(active.hostCalls).toHaveLength(2);
+  });
+
+  it("stops a message with directions when the switch is on and RouterAI is signed out", async () => {
+    active = await setup();
+    await active.harness.behavior.runCli(["claude-code", "on"]);
+    const decision = await dispatch();
+    expect(decision.action).toBe("reject");
+    expect(decision).toMatchObject({ message: expect.stringContaining("RouterAI is not signed in") });
+    // Never silently on the user's own Claude sign-in while the switch is on.
+    expect(await env()).toEqual([]);
+  });
+
+  it("calls the provider ready with a working key, and not with a rejected one", async () => {
+    active = await setup({ settings: { apiKey: "sk-good" } });
+    await active.harness.behavior.runCli(["claude-code", "on"]);
+    expect(await active.harness.behavior.resolveProviderEnvHealth("claude-code", { hostId: HOST })).toEqual({
+      label: "RouterAI",
+      statusMessage: "Runs through RouterAI.",
+    });
+    await active.harness.behavior.runCli(["logout"]);
+    expect(await active.harness.behavior.resolveProviderEnvHealth("claude-code", { hostId: HOST })).toBeNull();
+  });
+
+  it("reports the switch in the status and turns it off again", async () => {
+    active = await setup({ settings: { apiKey: "sk-good" } });
+    expect((await active.harness.behavior.runCli(["claude-code"])).stdout).toContain("off");
+    await active.harness.behavior.runCli(["claude-code", "on"]);
+    expect((await active.harness.behavior.callRpc("status", {})) as { claudeCode: boolean }).toMatchObject({ claudeCode: true });
+    await active.harness.behavior.callRpc("setClaudeCode", { enabled: false });
+    expect((await active.harness.behavior.runCli(["claude-code"])).stdout).toContain("off");
+  });
+
+  it("prices a routed thread from the tokens bb recorded, and knows nothing of other threads", async () => {
+    active = await setup({ settings: { apiKey: "sk-good" } });
+    await active.harness.behavior.runCli(["claude-code", "on"]);
+    const recorded = [
+      { seq: 1, type: "client/turn/requested", data: { execution: { model: "claude-sonnet-5-5" } } },
+      {
+        seq: 9,
+        type: "thread/tokenUsage/updated",
+        data: { tokenUsage: { total: { inputTokens: 1_000_000, cacheReadInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0 } } },
+      },
+    ];
+    active.harness.sdk.stub("threads.events.list", async (args: { afterSeq?: string }) =>
+      recorded.filter((row) => args.afterSeq === undefined || row.seq > Number(args.afterSeq)),
+    );
+    expect(await active.harness.behavior.callRpc("threadSpend", { threadId: "thr_cc" })).toEqual({ rubles: null });
+    expect(active.harness.sdk.callsTo("threads.events.list")).toHaveLength(0);
+
+    await env();
+    const spend = (await active.harness.behavior.callRpc("threadSpend", { threadId: "thr_cc" })) as { rubles: number };
+    expect(spend.rubles).toBeCloseTo(SONNET_INPUT_RUB_PER_MILLION);
+
+    // A later turn: only the new events are read, and the sum grows.
+    recorded.push({
+      seq: 20,
+      type: "thread/tokenUsage/updated",
+      data: { tokenUsage: { total: { inputTokens: 2_000_000, cacheReadInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0 } } },
+    });
+    const later = (await active.harness.behavior.callRpc("threadSpend", { threadId: "thr_cc" })) as { rubles: number };
+    expect(later.rubles).toBeCloseTo(2 * SONNET_INPUT_RUB_PER_MILLION);
+    expect(active.harness.sdk.callsTo("threads.events.list").at(-1)).toMatchObject([{ afterSeq: "9", limit: "100" }]);
   });
 });
 

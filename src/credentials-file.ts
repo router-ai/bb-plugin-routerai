@@ -58,3 +58,17 @@ async function exists(file: string): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * The private configuration directory Claude Code runs with when it goes
+ * through RouterAI. Its settings name a command that prints the key, so the
+ * key itself appears neither in the environment nor in the settings.
+ */
+export async function writeClaudeConfig(dataDir: string, platform: NodeJS.Platform = process.platform): Promise<string> {
+  const directory = path.join(dataDir, "claude-code");
+  const keyFile = credentialsPath(dataDir);
+  const apiKeyHelper = platform === "win32" ? `type "${keyFile}"` : `cat '${keyFile.replaceAll("'", "'\\''")}'`;
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await writeFile(path.join(directory, "settings.json"), `${JSON.stringify({ apiKeyHelper }, null, 2)}\n`, { mode: 0o600 });
+  return directory;
+}

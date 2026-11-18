@@ -19,4 +19,12 @@ export const hostContract = defineRpcContract({
     input: z.object({}).strict(),
     output: z.object({ installed: z.boolean() }).strict(),
   },
+  /**
+   * Prepares the configuration directory Claude Code uses on this machine
+   * when it runs through RouterAI, and returns where it is.
+   */
+  prepareClaudeConfig: {
+    input: z.object({}).strict(),
+    output: z.object({ path: z.string().min(1) }).strict(),
+  },
 });

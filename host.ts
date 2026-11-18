@@ -8,7 +8,7 @@ import { experimental_acpProviderBridge } from "@get-bb/plugin-sdk/provider-brid
 import { AGENT_COMMAND, findOnPath } from "./src/agent-binary.js";
 import { HealthCorrector } from "./src/bridge-health.js";
 import { hostContract } from "./src/contract.js";
-import { credentialsState, hostDataDirFromBridge, storeCredentials } from "./src/credentials-file.js";
+import { credentialsState, hostDataDirFromBridge, storeCredentials, writeClaudeConfig } from "./src/credentials-file.js";
 import { relabelSpend } from "./src/spend-currency.js";
 
 let health: HealthCorrector | null = null;
@@ -39,6 +39,9 @@ export default experimental_defineHostEntry({
   contract: hostContract,
   handlers: {
     agentInstalled: async () => ({ installed: (await findOnPath(AGENT_COMMAND)) !== null }),
+    prepareClaudeConfig: async (_input, context) => ({
+      path: await writeClaudeConfig(context.experimental_paths.dataDir),
+    }),
     storeCredentials: async ({ apiKey, rejected }, context) => ({
       path: await storeCredentials(context.experimental_paths.dataDir, apiKey, rejected ?? false),
     }),

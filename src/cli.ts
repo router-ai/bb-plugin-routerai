@@ -11,6 +11,8 @@ export interface CliActions {
   logout(): Promise<void>;
   catalog(): Promise<RouterAiModel[]>;
   setModels(ids: readonly string[]): Promise<void>;
+  claudeCode(): Promise<boolean>;
+  setClaudeCode(enabled: boolean): Promise<void>;
 }
 
 interface CliResult {
@@ -24,6 +26,7 @@ export const CLI_COMMANDS = [
   { name: "login", summary: "Sign in with RouterAI", usage: "bb routerai login [--manual] | bb routerai login --code <code-or-url>" },
   { name: "logout", summary: "Forget the RouterAI key", usage: "bb routerai logout" },
   { name: "models", summary: "List, search or set the picker models", usage: "bb routerai models [--json] | models search <text> | models set <slug>… | models reset" },
+  { name: "claude-code", summary: "Run bb's Claude Code provider through RouterAI", usage: "bb routerai claude-code [on|off]" },
 ] as const;
 
 export async function runCli(argv: readonly string[], actions: CliActions): Promise<CliResult> {
@@ -41,6 +44,8 @@ export async function runCli(argv: readonly string[], actions: CliActions): Prom
         return ok("Signed out of RouterAI.");
       case "models":
         return await models(actions, rest, json);
+      case "claude-code":
+        return await claudeCode(actions, rest);
       default:
         return {
           exitCode: command === undefined || command === "--help" || command === "help" ? 0 : 2,
@@ -50,6 +55,20 @@ export async function runCli(argv: readonly string[], actions: CliActions): Prom
   } catch (error) {
     return { exitCode: 1, stderr: error instanceof Error ? error.message : String(error) };
   }
+}
+
+async function claudeCode(actions: CliActions, rest: readonly string[]): Promise<CliResult> {
+  const [state] = rest;
+  if (state === "on" || state === "off") {
+    await actions.setClaudeCode(state === "on");
+    return ok(
+      state === "on"
+        ? "Claude Code now runs through RouterAI. New threads on the Claude Code provider are paid from your RouterAI balance."
+        : "Claude Code runs on its own sign-in again.",
+    );
+  }
+  if (state !== undefined) return { exitCode: 2, stderr: "Usage: bb routerai claude-code [on|off]" };
+  return ok(`Claude Code through RouterAI: ${(await actions.claudeCode()) ? "on" : "off"}`);
 }
 
 function ok(stdout: string): CliResult {

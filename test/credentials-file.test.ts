@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { credentialsPath, credentialsState, storeCredentials } from "../src/credentials-file.js";
+import { credentialsPath, credentialsState, storeCredentials, writeClaudeConfig } from "../src/credentials-file.js";
 
 describe("credentials file", () => {
   let dir: string;
@@ -44,5 +44,17 @@ describe("credentials file", () => {
     await storeCredentials(dir, "sk-test", true);
     await storeCredentials(dir, null);
     expect(await credentialsState(dir)).toBe("missing");
+  });
+
+  it("writes Claude Code settings that read the key from the key file", async () => {
+    const directory = await writeClaudeConfig(dir, "linux");
+    expect(directory).toBe(path.join(dir, "claude-code"));
+    const settings = JSON.parse(await readFile(path.join(directory, "settings.json"), "utf8"));
+    expect(settings).toEqual({ apiKeyHelper: `cat '${credentialsPath(dir)}'` });
+    expect((await stat(path.join(directory, "settings.json"))).mode & 0o777).toBe(0o600);
+
+    await writeClaudeConfig(dir, "win32");
+    const onWindows = JSON.parse(await readFile(path.join(directory, "settings.json"), "utf8"));
+    expect(onWindows.apiKeyHelper).toBe(`type "${credentialsPath(dir)}"`);
   });
 });

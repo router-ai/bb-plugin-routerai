@@ -372,6 +372,60 @@ function ModelsSection() {
   return <Models status={status} rpc={rpc} />;
 }
 
+// ── Claude Code ────────────────────────────────────────────────────────────
+
+function ClaudeCodeSection() {
+  const { rpc, status, error } = useStatus();
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  if (status === null) {
+    return error === null ? <Panel className="text-sm text-muted-foreground">Loading…</Panel> : <ErrorLine>{error}</ErrorLine>;
+  }
+  const on = status.claudeCode;
+  const toggle = async () => {
+    setBusy(true);
+    setFailure(null);
+    try {
+      // The server signals the change, which refreshes `status`.
+      await rpc.call("setClaudeCode", { enabled: !on });
+    } catch (cause) {
+      setFailure(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Panel>
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="text-sm font-medium">{on ? "On: Claude Code runs through RouterAI" : "Off: Claude Code uses its own sign-in"}</div>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {on
+              ? "Threads on bb's Claude Code provider are paid from your RouterAI balance. Your Claude subscription and the personal settings in ~/.claude are not used; settings in the project folder are."
+              : "Turn on to run bb's Claude Code provider on Claude models from RouterAI, paid in rubles. Claude Code itself must be installed."}
+          </p>
+          {on && !status.account.signedIn ? (
+            <p role="alert" className="mt-2 text-sm text-destructive">
+              Sign in above: until then Claude Code threads will not start.
+            </p>
+          ) : null}
+        </div>
+        <Button
+          variant={on ? "outline" : "default"}
+          className="shrink-0"
+          aria-pressed={on}
+          aria-label="Claude Code through RouterAI"
+          disabled={busy}
+          onClick={() => void toggle()}
+        >
+          {on ? "Turn off" : "Turn on"}
+        </Button>
+      </div>
+      {failure === null ? null : <ErrorLine>{failure}</ErrorLine>}
+    </Panel>
+  );
+}
+
 function SidebarBalance() {
   const { status, error } = useStatus();
   if (status === null) {
@@ -406,11 +460,13 @@ const SPEND_REFRESH_MS = 1500;
 
 /**
  * What the thread has spent so far, in rubles; null for a thread that has
- * spent nothing through RouterAI. Only our provider reports rubles, so the
- * currency alone tells our threads from everyone else's.
+ * spent nothing through RouterAI. Our own provider reports rubles itself;
+ * for a Claude Code thread routed through RouterAI the server works the
+ * sum out, and it answers null for every other thread.
  */
 function useThreadSpend(threadId: string): number | null {
   const sdk = useSdk();
+  const rpc = useRpc<typeof rpcContract>();
   const [spend, setSpend] = useState<number | null>(null);
   useEffect(() => {
     let live = true;
@@ -419,14 +475,21 @@ function useThreadSpend(threadId: string): number | null {
     const load = () => {
       timer = null;
       const request = ++latest;
-      sdk.threads.context({ threadId }).then(
-        (context) => {
+      sdk.threads
+        .context({ threadId })
+        .then(async (context) => {
           const cost = context.usage?.cost;
-          // An older answer must not replace a newer one.
-          if (live && request === latest) setSpend(cost?.currency === SPEND_CURRENCY && cost.amount > 0 ? cost.amount : null);
-        },
-        () => {}, // keep the last known figure
-      );
+          if (cost?.currency === SPEND_CURRENCY) return cost.amount;
+          // Claude Code reports tokens, not money; the server prices them.
+          return (await rpc.call("threadSpend", { threadId })).rubles;
+        })
+        .then(
+          (rubles) => {
+            // An older answer must not replace a newer one.
+            if (live && request === latest) setSpend(rubles !== null && rubles > 0 ? rubles : null);
+          },
+          () => {}, // keep the last known figure
+        );
     };
     setSpend(null);
     load();
@@ -442,11 +505,11 @@ function useThreadSpend(threadId: string): number | null {
       if (timer !== null) clearTimeout(timer);
       unsubscribe();
     };
-  }, [sdk, threadId]);
+  }, [sdk, rpc, threadId]);
   return spend;
 }
 
-const SPEND_HINT = "Spent by this thread through RouterAI, by the agent's token count";
+const SPEND_HINT = "Spent by this thread through RouterAI, by the agent's token count and catalog prices";
 
 function ThreadSpendSegment({ threadId }: { threadId: string }) {
   const spend = useThreadSpend(threadId);
@@ -489,6 +552,12 @@ export default definePluginApp((app) => {
     title: "Models in the picker",
     description: "Any RouterAI model that can call tools. The first one is the default for new threads.",
     component: ModelsSection,
+  });
+  app.slots.settingsSection({
+    id: "claude-code",
+    title: "Claude Code through RouterAI",
+    description: "Use bb's own Claude Code provider with your RouterAI balance instead of a Claude subscription.",
+    component: ClaudeCodeSection,
   });
   app.experimental_sidebarFooter.register({
     kind: "disclosure",

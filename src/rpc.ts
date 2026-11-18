@@ -46,6 +46,8 @@ export const rpcContract = defineRpcContract({
       missing: z.array(z.string()),
       /** True while the starter set is offered because nothing was chosen. */
       usingStarterSet: z.boolean(),
+      /** Whether bb's Claude Code provider runs through RouterAI. */
+      claudeCode: z.boolean(),
     }),
   },
   catalog: {
@@ -67,6 +69,15 @@ export const rpcContract = defineRpcContract({
   logout: {
     input: empty,
     output: empty,
+  },
+  setClaudeCode: {
+    input: z.object({ enabled: z.boolean() }).strict(),
+    output: empty,
+  },
+  /** Rubles a Claude Code thread spent through RouterAI; null for other threads. */
+  threadSpend: {
+    input: z.object({ threadId: z.string().min(1).max(200) }).strict(),
+    output: z.object({ rubles: z.number().nullable() }),
   },
 });
 
