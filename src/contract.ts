@@ -14,4 +14,9 @@ export const hostContract = defineRpcContract({
     input: z.object({ apiKey: z.string().min(1).nullable(), rejected: z.boolean().optional() }).strict(),
     output: z.object({ path: z.string().min(1) }).strict(),
   },
+  /** Whether the agent's command is on PATH on this machine. */
+  agentInstalled: {
+    input: z.object({}).strict(),
+    output: z.object({ installed: z.boolean() }).strict(),
+  },
 });

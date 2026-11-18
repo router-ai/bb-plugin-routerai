@@ -4,7 +4,7 @@
 // the balance in the sidebar footer come from the plugin's server part over
 // RPC; the API key never reaches the browser. A thread's spend comes from bb
 // itself, which records what the agent reports.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import {
   definePluginApp,
@@ -42,13 +42,20 @@ function useStatus() {
   const rpc = useRpc<typeof rpcContract>();
   const [status, setStatus] = useState<StatusResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Answers can arrive out of order (one request may wait on RouterAI while a
+  // later one is served from cache); only the latest request may update.
+  const latest = useRef(0);
   const refetch = useCallback(() => {
+    const request = ++latest.current;
     rpc.call("status", {}).then(
       (result) => {
+        if (request !== latest.current) return;
         setStatus(result);
         setError(null);
       },
-      (cause: unknown) => setError(messageOf(cause)),
+      (cause: unknown) => {
+        if (request === latest.current) setError(messageOf(cause));
+      },
     );
   }, [rpc]);
   useEffect(() => {
@@ -407,13 +414,16 @@ function useThreadSpend(threadId: string): number | null {
   const [spend, setSpend] = useState<number | null>(null);
   useEffect(() => {
     let live = true;
+    let latest = 0;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const load = () => {
       timer = null;
+      const request = ++latest;
       sdk.threads.context({ threadId }).then(
         (context) => {
           const cost = context.usage?.cost;
-          if (live) setSpend(cost?.currency === SPEND_CURRENCY && cost.amount > 0 ? cost.amount : null);
+          // An older answer must not replace a newer one.
+          if (live && request === latest) setSpend(cost?.currency === SPEND_CURRENCY && cost.amount > 0 ? cost.amount : null);
         },
         () => {}, // keep the last known figure
       );

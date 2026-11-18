@@ -5,6 +5,7 @@
 // reach bb in rubles and makes the provider's readiness follow the sign-in.
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
 import { experimental_acpProviderBridge } from "@get-bb/plugin-sdk/provider-bridge/acp";
+import { AGENT_COMMAND, findOnPath } from "./src/agent-binary.js";
 import { HealthCorrector } from "./src/bridge-health.js";
 import { hostContract } from "./src/contract.js";
 import { credentialsState, hostDataDirFromBridge, storeCredentials } from "./src/credentials-file.js";
@@ -37,6 +38,7 @@ export const experimental_providerBridge: typeof experimental_acpProviderBridge 
 export default experimental_defineHostEntry({
   contract: hostContract,
   handlers: {
+    agentInstalled: async () => ({ installed: (await findOnPath(AGENT_COMMAND)) !== null }),
     storeCredentials: async ({ apiKey, rejected }, context) => ({
       path: await storeCredentials(context.experimental_paths.dataDir, apiKey, rejected ?? false),
     }),

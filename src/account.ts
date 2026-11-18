@@ -17,6 +17,7 @@ const STATUS_TTL_MS = 20_000;
 /** Reads balance and key limits, briefly cached so the UI can poll freely. */
 export class AccountStore {
   private cached: { key: string; at: number; status: AccountStatus } | null = null;
+  private pending: { key: string; status: Promise<AccountStatus> } | null = null;
 
   constructor(
     private readonly api: RouterAiApi,
@@ -25,6 +26,7 @@ export class AccountStore {
 
   reset(): void {
     this.cached = null;
+    this.pending = null;
   }
 
   /** Whether the last answer for this key was a rejection; asks nobody. */
@@ -39,8 +41,17 @@ export class AccountStore {
     if (cached !== null && cached.key === apiKey && this.now() - cached.at < STATUS_TTL_MS) {
       return cached.status;
     }
-    const status = await this.read(apiKey);
-    this.cached = { key: apiKey, at: this.now(), status };
+    // Callers arriving while RouterAI is being asked share that one answer.
+    if (this.pending?.key === apiKey) return this.pending.status;
+    const status = this.read(apiKey).then((result) => {
+      // A reset or another key in the meantime makes this answer stale.
+      if (this.pending?.status === status) {
+        this.cached = { key: apiKey, at: this.now(), status: result };
+        this.pending = null;
+      }
+      return result;
+    });
+    this.pending = { key: apiKey, status };
     return status;
   }
 

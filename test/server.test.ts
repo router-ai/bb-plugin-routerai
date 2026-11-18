@@ -13,8 +13,11 @@ interface HostCall {
   hostId: string;
 }
 
-async function setup(options: { settings?: Record<string, string>; catalogFails?: boolean } = {}) {
+async function setup(
+  options: { settings?: Record<string, string>; catalogFails?: boolean; agentMissing?: boolean } = {},
+) {
   const hostCalls: HostCall[] = [];
+  const agentChecks = { count: 0 };
   const api = scriptedFetch({
     "GET /models": () =>
       options.catalogFails === true ? { status: 503, json: { error: "down" } } : { json: { data: CATALOG } },
@@ -38,14 +41,18 @@ async function setup(options: { settings?: Record<string, string>; catalogFails?
     ...(options.settings === undefined ? {} : { settings: options.settings }),
     experimental_hostEntry: true,
     experimental_callHostRpc: async ({ method, input, hostId }) => {
+      if (method === "agentInstalled") {
+        agentChecks.count += 1;
+        return { installed: options.agentMissing !== true };
+      }
       hostCalls.push({ method, input, hostId });
       return { path: KEY_FILE };
     },
   });
-  await plugin(bb, { fetch: api.fetch });
+  await plugin(bb, { fetch: api.fetch, hostname: () => "test-box" });
   /** Loads the plugin again over the same settings and storage, as a restart does. */
-  const restart = () => harness.lifecycle.reload((next) => plugin(next, { fetch: api.fetch }));
-  return { harness, hostCalls, apiCalls: api.calls, restart };
+  const restart = () => harness.lifecycle.reload((next) => plugin(next, { fetch: api.fetch, hostname: () => "test-box" }));
+  return { harness, hostCalls, agentChecks, apiCalls: api.calls, restart };
 }
 
 function declaredConfig(harness: Awaited<ReturnType<typeof setup>>["harness"]) {
@@ -222,9 +229,59 @@ describe("sending a message", () => {
     });
   });
 
+  it("is refused with install directions on a machine without OpenCode, asking again each time", async () => {
+    active = await setup({ settings: { apiKey: "sk-good" }, agentMissing: true });
+    const onMachine = () =>
+      active!.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({ requestedExecution: { providerId: "routerai" }, host: { id: HOST } }),
+      );
+    const decision = await onMachine();
+    expect(decision.action).toBe("reject");
+    expect(decision).toMatchObject({ message: expect.stringContaining("npm install -g opencode-ai") });
+    await onMachine();
+    expect(active.agentChecks.count).toBe(2);
+  });
+
+  it("checks a machine for OpenCode only until it is found there", async () => {
+    active = await setup({ settings: { apiKey: "sk-good" } });
+    const onMachine = () =>
+      active!.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({ requestedExecution: { providerId: "routerai" }, host: { id: HOST } }),
+      );
+    expect(await onMachine()).toEqual({ action: "proceed" });
+    expect(await onMachine()).toEqual({ action: "proceed" });
+    expect(active.agentChecks.count).toBe(1);
+  });
+
   it("leaves other providers' messages alone", async () => {
     active = await setup();
     expect(await dispatch("claude-code")).toEqual({ action: "proceed" });
+  });
+});
+
+describe("the name an installation signs in under", () => {
+  const appName = (stdout: string) => new URL(stdout.match(/https:\/\/routerai\.ru\/auth\S+/)![0]).searchParams.get("app_name");
+
+  it("carries the machine name and stays the same across sign-ins and restarts", async () => {
+    active = await setup();
+    const first = appName((await active.harness.behavior.runCli(["login"])).stdout);
+    expect(first).toMatch(/^bb-test-box-[0-9a-f]{4}$/);
+    expect(appName((await active.harness.behavior.runCli(["login", "--manual"])).stdout)).toBe(first);
+    active.harness = (await active.restart()).harness;
+    expect(appName((await active.harness.behavior.runCli(["login"])).stdout)).toBe(first);
+  });
+});
+
+describe("account status", () => {
+  it("asks RouterAI once for callers that arrive together", async () => {
+    active = await setup({ settings: { apiKey: "sk-good" } });
+    const before = active.apiCalls.filter((call) => call.path === "/credits").length;
+    await Promise.all([
+      active.harness.behavior.runCli(["status"]),
+      active.harness.behavior.runCli(["status"]),
+      active.harness.behavior.runCli(["status"]),
+    ]);
+    expect(active.apiCalls.filter((call) => call.path === "/credits").length - before).toBe(1);
   });
 });
 

@@ -3,7 +3,24 @@
 import { createHash, randomBytes } from "node:crypto";
 import { ROUTERAI_SITE_URL } from "./api.js";
 
-const APP_NAME = "bb";
+/**
+ * The name this bb installation signs in under, and the name of its key.
+ * RouterAI keeps one key per application name and reissues it on every
+ * sign-in, so a name shared by all installations would let a sign-in on one
+ * machine revoke the key of another. The machine name makes the key easy to
+ * recognise in the RouterAI key list; the random tail tells apart
+ * installations whose machines are named alike.
+ */
+export function installationName(hostname: string, tail: string = randomBytes(2).toString("hex")): string {
+  const machine = hostname
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 24)
+    .replace(/-+$/, "");
+  return ["bb", machine, tail].filter((part) => part !== "").join("-");
+}
+
 /** RouterAI's own default is 100 ₽ a day, too little for agent work. */
 const SUGGESTED_LIMIT_RUB = 1000;
 const LOGIN_TTL_MS = 10 * 60_000;
@@ -24,6 +41,8 @@ export function createPkcePair(): { codeVerifier: string; codeChallenge: string 
 }
 
 export function buildAuthorizeUrl(input: {
+  /** See {@link installationName}. */
+  appName: string;
   codeChallenge: string;
   state: string;
   callbackUrl?: string;
@@ -34,8 +53,8 @@ export function buildAuthorizeUrl(input: {
   url.searchParams.set("code_challenge", input.codeChallenge);
   url.searchParams.set("code_challenge_method", "S256");
   url.searchParams.set("state", input.state);
-  url.searchParams.set("app_name", APP_NAME);
-  url.searchParams.set("key_label", APP_NAME);
+  url.searchParams.set("app_name", input.appName);
+  url.searchParams.set("key_label", input.appName);
   url.searchParams.set("limit", String(SUGGESTED_LIMIT_RUB));
   url.searchParams.set("limit_period", "day");
   return url.toString();
@@ -69,7 +88,7 @@ export class LoginSessions {
 
   constructor(private readonly now: () => number = Date.now) {}
 
-  start(options: { callbackUrl?: string; siteUrl?: string }): PendingLogin {
+  start(options: { appName: string; callbackUrl?: string; siteUrl?: string }): PendingLogin {
     this.dropExpired();
     const { codeVerifier, codeChallenge } = createPkcePair();
     const state = randomBytes(18).toString("base64url");
@@ -78,6 +97,7 @@ export class LoginSessions {
       codeVerifier,
       ...(options.callbackUrl === undefined ? {} : { callbackUrl: options.callbackUrl }),
       authorizeUrl: buildAuthorizeUrl({
+        appName: options.appName,
         codeChallenge,
         state,
         ...(options.callbackUrl === undefined ? {} : { callbackUrl: options.callbackUrl }),

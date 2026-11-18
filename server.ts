@@ -3,6 +3,7 @@
 // Registers the `routerai` provider on the SDK's ACP bridge with OpenCode as
 // the agent, owns the sign-in and the API key, and tells OpenCode which
 // RouterAI models to offer.
+import { hostname } from "node:os";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { AccountStore, type AccountStatus } from "./src/account.js";
@@ -11,7 +12,7 @@ import { PROVIDER_ID, hostContract } from "./src/contract.js";
 import { OPENCODE_CONFIG_ENV, buildOpenCodeConfig } from "./src/opencode-config.js";
 import { ROUTERAI_DEFAULT_BASE_URL, createRouterAiApi, type FetchLike } from "./src/routerai/api.js";
 import { CatalogStore, isModelSlug, parseModelList, selectPickerModels, type RouterAiModel } from "./src/routerai/catalog.js";
-import { LoginSessions, parsePastedCode } from "./src/routerai/oauth.js";
+import { LoginSessions, installationName, parsePastedCode } from "./src/routerai/oauth.js";
 import { CHANGED_CHANNEL, rpcContract } from "./src/rpc.js";
 
 export { rpcContract } from "./src/rpc.js";
@@ -22,13 +23,18 @@ const PICKER_SNAPSHOT_KEY = "picker-models";
 export interface PluginDeps {
   /** Replaced in tests. */
   fetch?: FetchLike;
+  /** Replaced in tests; the name of the machine the bb server runs on. */
+  hostname?: () => string;
 }
 
+const NO_AGENT_MESSAGE =
+  "OpenCode is not installed on this machine, and RouterAI threads run on it. Install it with `npm install -g opencode-ai` (https://opencode.ai/docs), then send the message again.";
 const SIGNED_OUT_MESSAGE =
   "RouterAI is not signed in. Sign in under Settings → Plugins → RouterAI, or run `bb routerai login`.";
 const REJECTED_MESSAGE =
   "RouterAI rejected the key. Sign in again under Settings → Plugins → RouterAI, or run `bb routerai login`.";
 
+const INSTALLATION_NAME_KEY = "installation-name";
 /** Storage keys naming the machines that hold a key file. */
 const KEY_HOST_PREFIX = "key-host:";
 
@@ -166,6 +172,15 @@ export default async function plugin(bb: BbPluginApi, deps: PluginDeps = {}) {
 
   async function saveKey(apiKey: string): Promise<void> {
     await settings.experimental_set({ apiKey });
+  }
+
+  /** Chosen at the first sign-in and kept, so later sign-ins renew the same key. */
+  async function appNameOfInstallation(): Promise<string> {
+    const stored = await bb.storage.kv.get<string>(INSTALLATION_NAME_KEY);
+    if (typeof stored === "string" && stored !== "") return stored;
+    const name = installationName((deps.hostname ?? hostname)());
+    await bb.storage.kv.set(INSTALLATION_NAME_KEY, name);
+    return name;
   }
 
   function callbackUrl(): string {
@@ -335,12 +350,33 @@ export default async function plugin(bb: BbPluginApi, deps: PluginDeps = {}) {
     await accountStatus((await settings.get()).apiKey);
   });
 
+  // Machines known to have the agent. Only a yes is remembered: installing
+  // it is the fix we ask for, so a no is asked again each time.
+  const agentHosts = new Set<string>();
+
+  async function agentInstalled(hostId: string): Promise<boolean> {
+    if (agentHosts.has(hostId)) return true;
+    try {
+      const { installed } = await host.call("agentInstalled", {}, { hostId });
+      if (installed) agentHosts.add(hostId);
+      return installed;
+    } catch (error) {
+      // An unreachable machine has its own, clearer failure further on.
+      bb.log.warn(`Could not check for OpenCode on ${hostId}: ${String(error)}`);
+      return true;
+    }
+  }
+
   // Stop a message that cannot be answered before a thread fails on it with
-  // a bare "401 Unauthorized": say what to do instead. This sits on the path
-  // of every message, so it asks RouterAI only to re-check a key it already
-  // knows as rejected.
-  bb.experimental_hooks.on("message.dispatch", async ({ requestedExecution }) => {
+  // a bare "401 Unauthorized" or "spawn opencode ENOENT": say what to do
+  // instead. This sits on the path of every message, so it asks the machine
+  // only until the agent is found there, and RouterAI only to re-check a key
+  // it already knows as rejected.
+  bb.experimental_hooks.on("message.dispatch", async ({ requestedExecution, host: machine }) => {
     if (requestedExecution.providerId !== PROVIDER_ID) return { action: "proceed" };
+    if (machine !== null && !(await agentInstalled(machine.id))) {
+      return { action: "reject", message: NO_AGENT_MESSAGE };
+    }
     const { apiKey } = await settings.get();
     if (apiKey === undefined || apiKey === "") return { action: "reject", message: SIGNED_OUT_MESSAGE };
     if (account.knownRejected(apiKey)) {
@@ -356,11 +392,14 @@ export default async function plugin(bb: BbPluginApi, deps: PluginDeps = {}) {
   const actions: CliActions = {
     async status() {
       const current = await settings.get();
-      const [accountNow, picker] = await Promise.all([accountStatus(current.apiKey), pickerModels()]);
-      return { account: accountNow, ...picker };
+      // The account may take a while; read the model list after it, so the
+      // answer carries the list as it is when it leaves, not when it was asked.
+      const accountNow = await accountStatus(current.apiKey);
+      return { account: accountNow, ...(await pickerModels()) };
     },
     async startLogin(manual) {
-      const login = logins.start(manual ? {} : { callbackUrl: callbackUrl() });
+      const appName = await appNameOfInstallation();
+      const login = logins.start(manual ? { appName } : { appName, callbackUrl: callbackUrl() });
       return { authorizeUrl: login.authorizeUrl, manual };
     },
     completeLogin,
