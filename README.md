@@ -10,6 +10,7 @@
 </p>
 
 <p align="center">
+  <a href="https://getbb.app/marketplace/routerai"><img src="https://img.shields.io/badge/%D0%BA%D0%B0%D1%82%D0%B0%D0%BB%D0%BE%D0%B3-bb-2d67f6" alt="RouterAI в каталоге плагинов bb"></a>
   <a href="https://github.com/router-ai/bb-plugin-routerai/tags"><img src="https://img.shields.io/github/v/tag/router-ai/bb-plugin-routerai?label=%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F&color=2d67f6" alt="Версия"></a>
   <img src="https://img.shields.io/badge/bb-0.49%2B-1b2333" alt="bb 0.49 и новее">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="Лицензия MIT">
@@ -53,6 +54,15 @@ npm install -g opencode-ai
 Другие способы — в [документации OpenCode](https://opencode.ai/docs). Нужен bb версии 0.49 или новее.
 
 ### 2. Установите плагин
+
+RouterAI есть в [каталоге плагинов bb](https://getbb.app/marketplace/routerai), оттуда он ставится одной
+командой:
+
+```sh
+bb plugin install routerai
+```
+
+Без каталога — прямо из этого репозитория:
 
 ```sh
 bb plugin install "git:https://github.com/router-ai/bb-plugin-routerai@>=0.1.0"
